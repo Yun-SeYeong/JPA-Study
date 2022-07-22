@@ -219,3 +219,325 @@ Member 객체 생성 후 repository 를 통해 데이터 저장 및 조회한다
 >     implementation 'com.github.gavlyukovskiv:p6spy-spring-boot-starter:1.5.6'
 > }
 > ```
+
+
+
+
+
+
+
+# 도메인 분석 설계
+
+
+
+### 기능
+
+- 회원기능
+  
+  - 회원 등록
+  
+  - 회원 조회
+
+- 상품기능
+  
+  - 상품 등록
+  
+  - 상품 수정
+  
+  - 상품 조회
+
+- 주문기능
+  
+  - 상품 주문
+  
+  - 주문 내역 조회
+  
+  - 주문 취소
+
+- 기타 요구사항
+  
+  - 상품은 재고 관리가 필요
+  
+  - 상품의 종류는 도서, 음반, 영화
+  
+  - 상품을 카테고리로 구분
+  
+  - 상품 주문시 정보를 입력
+
+
+
+
+
+- Member
+
+```java
+@Entity
+@Getter
+@Setter
+public class Member {
+
+    @Id
+    @GeneratedValue
+    @Column(name = "lmember_id")
+    private Long id;
+
+    private String name;
+
+    @Embedded
+    private Address address;
+
+    @OneToMany(mappedBy = "member")
+    private List<Order> orders = new ArrayList<>();
+}
+```
+
+
+
+- Order
+
+```java
+@Entity
+@Table(name = "Orders")
+public class Order {
+
+    @Id
+    @GeneratedValue
+    @Column(name = "order_id")
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "member_id")
+    private Member member;
+
+    @OneToMany(mappedBy = "order")
+    private List<OrderItem> orderItemList = new ArrayList<>();
+
+    @OneToOne
+    @JoinColumn(name = "delivery_id")
+    private Delivery delivery;
+
+    private LocalDateTime orderDate;
+
+    private OrderStatus status;
+}
+```
+
+
+
+Member는 Order와 일대다 관계이다. 따라서 Member에는 `List<Order>`가 들어가게 되고 Order에는 `Member` 객체가 들어가게 된다. 또한 Order테이블에서 Join을 하여 수정시 Order를 통해 수정할 수 있도록한다. Member의 List는 읽기만 가능한 상태가 된다.
+
+
+
+- Delivery
+
+```java
+@Entity
+@Getter
+@Setter
+public class Delivery {
+
+    @Id
+    @GeneratedValue
+    @Column(name = "delivery_id")
+    private Long id;
+
+    @OneToOne(mappedBy = "delivery")
+    private Order order;
+
+    @Embedded
+    private Address address;
+
+    @Enumerated(EnumType.STRING)
+    private DeliveryStatus status;
+}
+```
+
+
+
+Order에서 Delivery는 일대일 관계이다. 따라서 양쪽에 Order와 Delivery 객체가 존재하게된다. 이때 Join은 양쪽 어떤 테이블에 해도 관계없으나 주로 많이 사용되는 Order에 지정하였다.
+
+Address는 Embedded를 통해 포함 시킨다. Address에 Embeddable과 Embedded 중 하나만 넣어도 되지만 확인이 비교적 수월하도록 양쪽에 넣는다.
+
+DeliveryStatus는 Enum을 통해 넣어주고 EnumType.STRING으로 지정한다. ORDINAL로 지정하면 숫자로 들어가게 되는데 만약 중간에 새로운 값이 추가되면 기존 데이터와 혼동이 생기게 됨으로 STRING으로 지정한다.
+
+
+
+- OrderItem
+
+```java
+@Entity
+@Getter
+@Setter
+public class OrderItem {
+
+    @Id
+    @GeneratedValue
+    @Column(name = "order_item_id")
+    private Long id;
+
+    @ManyToOne
+    @JoinColumn(name = "item_id")
+    private Item item;
+
+    @ManyToOne
+    @JoinColumn(name = "order_id")
+    private Order order;
+
+    private int orderPrice;
+    private int count;
+
+}
+```
+
+
+
+OrderItem은 Order와 다대일 Item과 다대일로 두객체의 관계성을 나타내게 된다. 따라서 두객체 모두 ManyToOne으로 설정하고 JoinColumn을 통해 객체를 수정할 수 있도록 한다.
+
+
+
+- Item
+
+```java
+@Entity
+@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+@DiscriminatorColumn(name = "dtype")
+@Getter
+@Setter
+public class Item {
+
+    @Id
+    @GeneratedValue
+    @Column(name = "item_id")
+    private Long id;
+
+    private String name;
+    private int price;
+    private int stockQuantity;
+}
+```
+
+Item은 상속관계로 SINGLE_TABLE로 성정한다. SINGLE_TABLE은 하나의 테이블에 상속 테이블 내용이 모두 들어간다. DiscriminatorColumn을 통해 어떤 타입인지 알 수 있는 컬럼을 설정한다.
+
+
+
+- Album
+
+```java
+@Entity
+@DiscriminatorValue("A")
+@Getter
+@Setter
+public class Album extends Item {
+    private String artist;
+    private String etc;
+}
+```
+
+- Book
+
+```java
+@Entity
+@DiscriminatorValue("B")
+@Getter
+@Setter
+public class Book extends Item {
+    private String author;
+    private String isbn;
+}
+```
+
+- Movie
+
+```java
+@Entity
+@DiscriminatorValue("M")
+@Getter
+@Setter
+public class Movie extends Item {
+    private String director;
+    private String actor;
+}
+```
+
+위 3개의 객체는 Item을 상속받고 DiscriminatorValue를 통해 해당 타입을 표현할 문자를 지정한다. 기본적으로 클래스이름으로 들어간다.
+
+
+
+- Category
+
+```java
+@Entity
+@Getter
+@Setter
+public class Category {
+
+    @Id
+    @GeneratedValue
+    @Column(name = "category_id")
+    private Long id;
+
+    private String name;
+
+    @ManyToMany
+    @JoinTable(name = "category_item",
+            joinColumns = @JoinColumn(name = "category_id"),
+            inverseJoinColumns = @JoinColumn(name = "item_id"))
+    private List<Item> items = new ArrayList<>();
+
+    @ManyToOne
+    @JoinColumn(name = "parent_id")
+    private Category parent;
+
+    @OneToMany(mappedBy = "parent")
+    private List<Category> child = new ArrayList<>();
+
+}
+```
+
+
+
+- Item (수정)
+
+```java
+public class Item {
+
+    --- 중략 ---
+
+    @ManyToMany(mappedBy = "items")
+    private List<Category> categories = new ArrayList<>();
+}
+```
+
+
+
+Category와 Item은 다대다 관계이다. 이때 중간 테이블이 필요한데  `@JoinTable`을 통해 중간 테이블을 자동으로 생성해 줄 수 있다. joinColumns는 join할 테이블의 id, inverseJoinColumns는 반대 테이블에서 join할 id를 지정한다.
+
+Category는 Parent와 child가 필요하다 이때 대상이 자신인 Category 테이블임으로 parent는 일대다 관계로 child를 다대일 관계로 설정한다.
+
+
+
+### Entity 설계시 주의점
+
+
+
+- Setter를 사용하지 말자
+  
+  Setter를 모두 열면 언제 변경이 되었는지 찾기 어려움
+
+
+
+- 모든 연관관계는 지연로딩으로 설정
+  
+  즉시로딩(EAGER)는 예측이 어렵고 SQL을 추적하기 어려움 따라서 지연로딩(LAZY)를 설정해야한다. 특히 JPQL을 사용시 연관 테이블의 데이터를 모두 같이 조회되는 n+1문제가 발생된다. XToOne 설정시 기본 fetch는 EAGER이다. 
+
+
+
+- cascade = CascadeType.ALL
+  
+  Cascade 설정 시 관련 테이블을 각각 모두 생성하지 않아도 자동으로 모두 생성해준다.
+
+
+
+- 연관관계 매서드
+
+- 
