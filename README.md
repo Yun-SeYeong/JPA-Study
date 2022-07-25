@@ -538,6 +538,18 @@ Category는 Parent와 child가 필요하다 이때 대상이 자신인 Category 
 
 
 
-- 연관관계 매서드
 
-- 
+
+# 애플리케이션 구현 준비
+
+
+
+계층형 구조 사용
+
+controlle, web: 웹 계층
+
+service: 비즈니스 로직, 트랜잭션 처리
+
+repository: JPA를 직접 사용하는 계층, 엔티티 매니저 사용
+
+domain: 엔티티가 모여있는 계층, 모든 계층에서 사용
