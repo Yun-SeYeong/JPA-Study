@@ -25,6 +25,9 @@ public class Item {
     private int price;
     private int stockQuantity;
 
+    private String isbn;
+    private String author;
+
     @ManyToMany(mappedBy = "items")
     private List<Category> categories = new ArrayList<>();
 
