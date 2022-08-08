@@ -10,7 +10,7 @@ spring:
   jpa:
     hibernate:
       # ?????? ?? ??
-      ddl-auto: none
+      ddl-auto: create
     properties:
       hibernate:
 #        System.out.println ?? ???
@@ -25,4 +25,4 @@ spring:
 logging:
   level:
     org.hibernate.sql: debug
-    org.hibernate.type: trace
+#    org.hibernate.type: trace

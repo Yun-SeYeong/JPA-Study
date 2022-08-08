@@ -553,3 +553,604 @@ service: 비즈니스 로직, 트랜잭션 처리
 repository: JPA를 직접 사용하는 계층, 엔티티 매니저 사용
 
 domain: 엔티티가 모여있는 계층, 모든 계층에서 사용
+
+
+
+
+
+# 회원 레파지토리 개발
+
+
+
+Spring Boot에서는 Repository Class에 대해 @Repository 어노테이션을 통해 구분한다.
+
+```java
+@Repository
+public class MemberRepository {
+    ...
+}
+```
+
+
+
+JPA에서 데이터를 쓰고 읽는 등 작업을 할때 EntityManager를 이용하는데 @PersistenceContext를 이용하면 자동으로 주입해준다.
+
+```java
+@PersistenceContext
+private EntityManager em;
+```
+
+
+
+다음과 같이 EntityManagerFactory를 직접 주입받을 수도 있다.
+
+```java
+@PersistenceUnit
+private EntityManagerFactory emf;
+```
+
+
+
+기본적으로 @Transactional을 클래스에 지정하면 public 매서드에 대해서는 Transactinal하게 동작한다. 만약 옵션으로 readOnly를 사용할 경우 해당 함수는 읽기 전용으로 열리게 되는데 영속성 컨텍스트에서 더티체크를 안한다던지 보다 최적화 할 수 있다.
+
+```java
+@Transactional(readOnly = true)
+public class MemberService {
+    @Transactional
+    public write() {}
+    public read() {}
+}
+```
+
+
+
+Test 작성시 클래스에 Transactional을 넣으면 기본적으로 insert query문이 전송되지 않는다. Rollback(value=false)를 넣어주면 insert query문이 전송된다. 또는 em.flush()를 통해 데이터베이스에 반영할 수 도 있다.
+
+```java
+@SpringBootTest
+@Transactional
+class MemberServiceTest {
+
+    @Autowired
+    MemberService memberService;
+    @Autowired
+    MemberRepository memberRepository;
+
+    @Test
+    @Rollback(value = false)
+    public void 회원가입() {
+        //given
+        Member member = new Member();
+        member.setName("kim");
+
+        //when
+        Long savedId = memberService.join(member);
+
+        //then
+        assertEquals(member, memberRepository.findOne(savedId));
+    }
+}
+```
+
+
+
+Test시 데이터베이스와 격리된 환경에서 테스트 하고 싶으면 메모리 모드로 테스트 해볼 수 있다.
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:h2:mem:test
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+```
+
+하지만 스프링 부트는 기본적으로 메모리 모드로 DB를 올린다. 따라서 위 설정을 제거해도 정상 동작할 수 있다.
+
+
+
+
+
+
+
+# 상품 도메인 개발
+
+
+
+엔티티에 필요한 비즈니스로직을 추가한다.
+
+```java
+    //==비즈니스 로직==//
+
+    /**
+     * stock 증가
+     */
+    public void addStock(int quantity) {
+        this.stockQuantity += quantity;
+    }
+
+    /**
+     * stock 감소
+     */
+    public void removeStock(int quantity) {
+        int restStock = this.stockQuantity - quantity;
+        if (restStock < 0) {
+            throw new NotEnoughStockException("need more stock");
+        }
+        this.stockQuantity = restStock;
+    }
+```
+
+
+
+
+
+### Item 등록
+
+```java
+public void save(Item item) {
+        if (item.getId() == null) {
+            em.persist(item);
+        } else {
+            em.merge(item);
+        }
+}
+```
+
+id의 경우 기본적으로 null이 입력되어있다. 따라서 null이 들어있을 시에는 id를 새로 생성해주어야 한다. 만약 있을경우 해당 Id에 업데이트 하게 된다.
+
+
+
+
+
+# 주문 도메인 개발
+
+
+
+Order 비즈니스 로직
+
+```java
+    //==생성 매소드==//
+    public static Order createOrder(Member member, Delivery delivery, OrderItem... orderItems) {
+        Order order = new Order();
+        order.setMember(member);
+        order.setDelivery(delivery);
+        for (OrderItem orderItem : orderItems) {
+            order.addOrderItem(orderItem);
+        }
+        order.setStatus(OrderStatus.ORDER);
+        order.setOrderDate(LocalDateTime.now());
+        return order;
+    }
+
+    //==비즈니스 로직==//
+    /**
+     * 주문 취소
+     */
+    public void cancel() {
+        if (delivery.getStatus() == DeliveryStatus.COMP) {
+            throw new IllegalStateException("이미 배송완료된 상품을 취소가 불가능합니다.");
+        }
+
+        this.setStatus(OrderStatus.CANCEL);
+        for (OrderItem orderItem : orderItems) {
+            orderItem.cancel();
+        }
+    }
+
+    //==조회 로직==//
+    /**
+     * 전체 주문 가격 조회
+     */
+    public int getTotalPrice() {
+        return orderItems.stream()
+                .mapToInt(OrderItem::getTotalPrice)
+                .sum();
+    }
+```
+
+생성시 Order객체 생성후 Setter를 통해 초기화한뒤 반환 해준다. static 매소드로 만들어 생성 로직을 위 함수를 사용하도록 한다. 하지만 누군가 실수로 생성할 수 있음으로 생성자를 protected로 만들어준다. 이를 생략할 수 있는 어노테이션이 `@NoArgumentConstructor(access = AccessLevel.PROTECTED)` 이다.
+
+
+
+취소시 해당 주문의 상태를 취소로 만들고 연결된 OrderItem들에도 cancel을 호출한다.
+
+
+
+조회시 모든 Item의 count 와 price를 곱해서 응답한다.
+
+
+
+OrderItem 비즈니스 로직
+
+
+
+```java
+     //==생성 매서드==//
+    public static OrderItem createOrderItem(Item item, int orderPrice, int count) {
+        OrderItem orderItem = new OrderItem();
+        orderItem.setItem(item);
+        orderItem.setOrderPrice(orderPrice);
+        orderItem.setCount(count);
+
+        item.removeStock(count);
+        return orderItem;
+    }
+
+    //==비즈니스 로직==//
+    public void cancel() {
+        getItem().addStock(count);
+    }
+
+    //==조회 로직==//
+    /**
+     * 주문상품 전체 가격 조회
+     */
+    public int getTotalPrice() {
+        return getOrderPrice() * getCount();
+    }
+```
+
+생성시 OrderItem객체 생성 후 Setter를 통해 초기화한다. 마지막으로 item의 재고를 줄인다.
+
+
+
+```java
+    /**
+     * 주문
+     */
+    @Transactional
+    public Long order(Long memberId, Long itemId, int count) {
+        //엔티티 조회
+        Member member = memberRepository.findOne(memberId);
+        Item item = itemRepository.findOne(itemId);
+
+        //배송 생성
+        Delivery delivery = new Delivery();
+        delivery.setAddress(member.getAddress());
+
+        //주문상품 생성
+        OrderItem orderItem = OrderItem.createOrderItem(item, item.getPrice(), count);
+
+        //주문 생성
+        Order order = Order.createOrder(member, delivery, orderItem);
+
+        //주문 저장
+        orderRepository.save(order);
+
+        return order.getId();
+    }
+
+    /**
+     * 주문 취소
+     */
+    @Transactional
+    public void cancelOrder(Long orderId) {
+        //주문 엔티티 조회
+        Order order = orderRepository.findOne(orderId);
+        //주문 취소
+        order.cancel();
+    }
+```
+
+
+
+주문시 member와 item을 조회하여 필요한 정보를 수집한다. 수집된 정보를 바탕으로 OrderItem과 Order를 생성한다. 이때 생성자로 생성하는게 아닌 static으로 생성해둔 생성 매소드를 통해 생성한다.
+
+마지막에 order를 저장하면 연결된 orderItem와 Item이 모두 업데이트 된다.
+
+
+
+취소시 해당 order를 찾아 cancel매소드를 호출한다.
+
+
+
+
+
+
+
+# 회원 등록
+
+
+
+Form 데이터를 체크하기 위한 GetMapping을 한다.
+
+```java
+@GetMapping("/members/new")
+public String createForm(Model model) {
+    model.addAttribute("memberForm", new MemberForm());
+    return "members/createMemberForm";
+}
+```
+
+
+
+Form 데이터를 전달된 데이터를 memberSerivce를 통해 DB에 생성하고 `/`로 리다이렉트한다. 이때 @Valid를 통해 유효성 검사를 한다. 만약 데이터에 문제가 있다면 BindingResult에 에러가 들어오고 이를 응답해줄 수 있다.
+
+```java
+@PostMapping("members/new")
+public String create(@Valid MemberForm form, BindingResult result) {
+    if (result.hasErrors()) {
+        return "members/createMemberForm";
+    }
+
+    Address address = new Address(form.getCity(), form.getStreet(), form.getZipcode());
+
+    Member member = new Member();
+    member.setName(form.getName());
+    member.setAddress(address);
+
+    memberService.join(member);
+    return "redirect:/";
+}
+```
+
+
+
+
+
+# 변경감지와 병합
+
+
+
+### 준영속 컨텍스트
+
+준영속 컨텍스트는 DB에서의 식별자를 가지고 있지만 직접 new로 생성한 객체로 영속성 컨텍스트가 변경에 대해 감지하지 않는다. 따라서 준영속컨텍스트는 변경후 commit을 하지 않으면 DB에 반영되지 않는다.
+
+
+
+### merge
+
+`merge()`를 사용하면 준영속 컨텍스트를 1차캐시된 엔티티를 찾아서 해당 엔티티에 set을 통해 데이터를 모두 저장한다. 그뒤 해당 영속성 컨텍스트를 return해준다. 따라서 이후 변경시에는 반환된 영속성 컨텍스트를 사용하면 된다.
+
+주의할 점은 merge를 요청시 준영속성 컨텍스트의 모든 내용이 들어가기때문에 변경하지 않을려는 데이터도 모두 들어가고 없다면 null로 넣게된다. 따라서 실무에서는 사용하지 않는걸 권장한다.
+
+
+
+
+
+
+
+
+
+
+
+# 실전! 스프링 부트와 JPA활용2 - API개발과 성능 최적화
+
+
+
+## 회원 등록 API
+
+```java
+@PostMapping("/api/v1/members")
+public CreateMemberResponse saveMemberV1(@RequestBody @Valid Member member) {
+    Long id = memberService.join(member);
+    return new CreateMemberResponse(id);
+}
+
+
+@Data
+static class CreateMemberResponse {
+    private Long id;
+
+    public CreateMemberResponse(Long id) {
+        this.id = id;
+    }
+}
+```
+
+
+
+Member를 생성하는 API로 Request Body에 대해서 Entity객체를 통해 bind 받게 되어있다. 이는 API 스펙과 Entity스펙을 연결 짓게 된다. 문제점은 Member의 스펙이 변경되면 모든 API 스펙에 변경이 요규된다. 따라서 이는 따로 가져가는 것이 중요하다.
+
+
+
+```java
+@PostMapping("/api/v2/members")
+public CreateMemberResponse saveMemberV2(@RequestBody @Valid CreateMemberRequest request) {
+
+    Member member = new Member();
+    member.setName(request.name);
+
+    Long id = memberService.join(member);
+    return new CreateMemberResponse(id);
+}
+
+@Data
+static class CreateMemberRequest {
+    private String name;
+}
+```
+
+API 스펙과 Entity 스펙을 분리하였다. 따라서 Entity 변경시 API 스펙에 영향을 받지 않게 된다. 또한 API별로 @NotEmpty등 요구사항을 따로 적용할 수 있게된다.
+
+
+
+
+
+
+
+## 회원 수정 API
+
+```java
+@PutMapping("/api/v2/members/{id}")
+public UpdateMemberResponse updateMemberV2(
+        @PathVariable("id") Long id,
+        @RequestBody @Valid UpdateMemberRequest request
+) {
+    memberService.update(id, request.getName());
+    Member findMember = memberService.findOne(id);
+    return new UpdateMemberResponse(findMember.getId(), findMember.getName());
+}
+```
+
+```java
+@Transactional
+public void update(Long id, String name) {
+    Member member = memberRepository.findOne(id);
+    member.setName(name);
+}
+```
+
+
+
+`@PathVariable`을 통해 변경할 Member의 id를 받고 Body를 통해 변경될 내용을 받게 된다. update함수는 Member를 영속성 컨텍스트로 받아와 name을 변경하고 종료된다. 다시 돌아와 API에서는 Member를 조회하여 전달한다. 이때 조회를 한번더 하는건 update함수에서 조회 기능을 배제하기 위함이다. 성능적으로 문제가 없다면 유지보수 차원에서 효과적일 수 있다.
+
+
+
+
+
+## 회원 조회 API
+
+```java
+@GetMapping("/api/v1/members")
+public List<Member> membersV1() {
+    return memberService.findMembers();
+}
+```
+
+기본적으로 생각할 수 있는 조회 API이다. memberService를 통해 조회한 Entity를 바로 return 해주면 Json으로 변경되어 응답할 수 있게된다. 문제점은 Response와 Entity가 같다는 것이다. 만약 Entity가 변경되면 관련되 API 스펙에 영향을 끼치게 된다. 따러서 분리하는것이 좋다. 또한 응답이 List형태로 시작한다. 이는 추가적인 파라미터를 넣기에 유연하지 못하다.
+
+
+
+```java
+@GetMapping("/api/v2/members")
+public Result membersV2() {
+    List<Member> findMembers = memberService.findMembers();
+    List<MemberDto> collect = findMembers.stream().map(m -> new MemberDto(m.getName()))
+            .collect(Collectors.toList());
+
+    return new Result(collect);
+}
+
+@Data
+@AllArgsConstructor
+static class Result<T> {
+    private T data;
+}
+@Data
+@AllArgsConstructor
+static class MemberDto {
+    private String name;
+}
+```
+
+Response에 대해 DTO를 정의해주고 Entity로부터 필요한 데이터만 파싱해온다. 이는 API스펙과 Entity 스펙을 분리할 수 있도록 해준다. 마지막에 Result로 감싸서 Response의 상단이 Object형태로 올 수 있도록 한다.
+
+
+
+
+
+
+
+
+
+## 간단한 주문 조회 V1: 엔티티를 직접 노출
+
+```java
+@GetMapping("/api/v1/simple-orders")
+public List<Order> ordersV1() {
+    List<Order> all = orderRepository.findAllByString(new OrderSearch());
+    return all;
+}
+```
+
+위와 같이 Entity를 직접호출하여 Order전체를 조회한다. 이때 Order를 조회하면서 내부에 Lazy로딩이 걸리는 데이터에 대해서 모두 호출이 된다. 조회된 Entity에서는 다시 Lazy로딩을 한다. 따라서 순환참조가 일어나 무한 로딩이 걸리게 된다. 이를 막기 위해서는 한쪽에서 JsonIgnore를 통해 다시 참조하지 않도록 해야한다. 하지만 해당 엔티티는 null이 들어 갈 수 없다. 왜냐하면 프록시 객체가 들어있기 때문이다. 따라서 해당 데이터를 null로 인식되도록 아래 설정을 추가할 수 있다.
+
+```java
+@Bean
+Hibernate5Module hibernate5Module() {
+	return new Hibernate5Module();
+}
+```
+
+
+
+
+
+## 간단한 주문 조회 V1: 엔티티를 DTO로 변환
+
+```java
+@GetMapping("/api/v2/simple-orders")
+public List<SimpleOrderDto> ordersV2() {
+    List<Order> orders = orderRepository.findAllByString(new OrderSearch());
+    return orders.stream()
+            .map(SimpleOrderDto::new)
+            .collect(Collectors.toList());
+}
+
+@Data
+static class SimpleOrderDto {
+    private Long orderId;
+    private String name;
+    private LocalDateTime orderDate;
+    private OrderStatus orderStatus;
+    private Address address;
+
+    public SimpleOrderDto(Order order) {
+        orderId = order.getId();
+        name = order.getMember().getName();
+        orderDate = order.getOrderDate();
+        orderStatus = order.getStatus();
+        address = order.getDelivery().getAddress();
+    }
+}
+```
+
+API Response에 대해 미리 상의후 정의 한다. 이는 Entity와 API 스펙을 분리하는데 목적이 있다. 하지만 아직 문제점이 남아 있는데 Order조회후 getMember()호출시 Member가 Lazy로딩이 되면서 Query를 날리게 된다. 이를 N + 1 문제라고 한다.
+
+
+
+## 간단한 주문 조회 V1: 페치 조인 최적화
+
+```java
+@GetMapping("/api/v3/simple-orders")
+public List<SimpleOrderDto> ordersV3() {
+    List<Order> orders = orderRepository.findAllwithMemberDelivery();
+    return orders.stream()
+            .map(SimpleOrderDto::new)
+            .collect(Collectors.toList());
+}
+```
+
+
+
+```java
+public List<Order> findAllwithMemberDelivery() {
+    return em.createQuery(
+            "select o from Order o" +
+                    " join fetch o.member m" +
+                    " join fetch o.delivery d", Order.class
+    ).getResultList();
+}
+```
+
+
+
+위에서 생겼던 N+1 문제를 해결하기 위해 서는 Query를 조인을 통해 한번에 해야 한다. 이는 JPQL을 이용하면 한번에 관련 조인 데이터를 가져오는 쿼리를 만들 수 있다.
+
+
+
+
+
+## 간단한 주문 조회 V1: JPA에서 DTO 바로 조회
+
+```java
+@GetMapping("/api/v4/simple-orders")
+public List<OrderSimpleQueryDto> ordersV4() {
+    return orderRepository.findOrderDtos();
+}
+```
+
+```java
+public List<OrderSimpleQueryDto> findOrderDtos() {
+    return em.createQuery(
+            "select new jpabook.jpashop.repository.OrderSimpleQueryDto(o.id, m.name, o.orderDate, o.status, d.address) " +
+                    "from Order o" +
+                    " join o.member m" +
+                    " join o.delivery d", OrderSimpleQueryDto.class
+    ).getResultList();
+}
+```
+
+실제 SQL에서 조회할 컬럼을 선택하듯이 OrderSimpleQueryDto를 생성하여 원하는 컬럼만 조회하는 방법이다. 모든 컬럼이 아닌 필요한 컬럼만 가져올 수 있다. 하지만 생각보다 성능 향상의 효과가 미비하다. 또한 API스펙에 대한 내용이 Repository 안에 들어오게 된다. 따라서 사용해야한다면 별도로 Repository를 생성하여 분리하는 것이 좋다.
