@@ -1154,3 +1154,336 @@ public List<OrderSimpleQueryDto> findOrderDtos() {
 ```
 
 실제 SQL에서 조회할 컬럼을 선택하듯이 OrderSimpleQueryDto를 생성하여 원하는 컬럼만 조회하는 방법이다. 모든 컬럼이 아닌 필요한 컬럼만 가져올 수 있다. 하지만 생각보다 성능 향상의 효과가 미비하다. 또한 API스펙에 대한 내용이 Repository 안에 들어오게 된다. 따라서 사용해야한다면 별도로 Repository를 생성하여 분리하는 것이 좋다.
+
+
+
+
+
+
+
+## 주문 조회 V1: 엔티티 직접 노출
+
+```java
+@GetMapping("/api/v1/orders")
+public List<Order> ordersV1() {
+    List<Order> all = orderRepository.findAllByString(new OrderSearch());
+    for (Order order : all) {
+        order.getMember().getName();
+        order.getDelivery().getAddress();
+        List<OrderItem> orderItems = order.getOrderItems();
+        orderItems.stream().forEach(orderItem -> orderItem.getItem().getName());
+    }
+    return all;
+}
+```
+
+기본 적으로 생각할 수 있는 일대다 관계의 엔티티를 조회하는 API이다. getOrderItems() 한 뒤 Item을 조회하여 Lazy로딩을 한다. 이렇게 하면 필요한 데이터가 모두 조회되어 한번에 응답할 수 있게된다. 하지만 API스펙에 Entity가 적용되어 Entity 변경이 어려워진다.
+
+
+
+## 주문 조회 V2: 엔티티를 DTO로 변환
+
+```java
+@GetMapping("/api/v2/orders")
+public List<OrderDto> ordersV2() {
+    List<Order> orders = orderRepository.findAllByString(new OrderSearch());
+    List<OrderDto> collect = orders.stream()
+            .map(o -> new OrderDto(o))
+            .collect(Collectors.toList());
+
+    return collect;
+}
+```
+
+```java
+@Getter
+static class OrderDto {
+    private Long orderId;
+    private String name;
+    private LocalDateTime orderDate;
+    private OrderStatus orderStatus;
+    private Address address;
+    private List<OrderItemDto> orderItems;
+    public OrderDto(Order order) {
+        orderId = order.getId();
+        name = order.getMember().getName();
+        orderDate = order.getOrderDate();
+        orderStatus = order.getStatus();
+        address = order.getDelivery().getAddress();
+        orderItems = order.getOrderItems().stream()
+                .map(OrderItemDto::new)
+                .collect(Collectors.toList());
+    }
+}
+
+@Getter
+static class OrderItemDto {
+    private String itemName;
+    private int orderPrice;
+    private int count;
+
+    public OrderItemDto(OrderItem orderItem) {
+        itemName = orderItem.getItem().getName();
+        orderPrice = orderItem.getOrderPrice();
+        count = orderItem.getCount();
+    }
+}
+```
+
+DTO를 생성하여 해당 조회된 Order로 채우게 된다. 이렇게 하면 API 스펙과 Entity를 분리하였지만 Query수는 굉장히 많게 된다. 주의할 점은 OrderDto안에 OrderItem을 사용하는 것이 아닌 OrderItemDto를 만들어 넣어주어야 한다는 점이다.
+
+
+
+
+
+## 주문 조회 V3: 엔티티를 DTO로 변환 - 패치 조인 최적화
+
+```java
+@GetMapping("/api/v3/orders")
+public List<OrderDto> ordersV3() {
+    List<Order> orders = orderRepository.findAllWithItem();
+    List<OrderDto> collect = orders.stream()
+            .map(o -> new OrderDto(o))
+            .collect(Collectors.toList());
+
+    return collect;
+}
+```
+
+```java
+public List<Order> findAllWithItem() {
+    return em.createQuery(
+            "select distinct o from Order o" +
+                    " join fetch o.member m" +
+                    " join fetch o.delivery d" +
+                    " join fetch o.orderItems oi" +
+                    " join fetch oi.item i", Order.class).getResultList();
+
+}
+```
+
+Fetch join을 통해 쿼리를 줄일 수 있다. 하지만 그냥 페치 조인만 사용하게되면 조인된 데이터 수 만큼 늘어나게 된다. 따라서 중복을 제거해야 하는데 distinct를 사용하면 중복을 제거할 수 있다. 이때 distinct는 SQL에서의 distinct도 붙여주지만 조회된 Entity에 대해서 id로 중복을 한번더 제거해 준다. 
+
+
+
+하지만 위 방법은 치명적인 단점이 있다. 페이징이 불가능 하다는 점이다. 만약 setFirstResult 또는 setMaxResults를 통해 페이징을 하면 SQL에 페이징이 들어가는게 아니라 Entity를 메모리에 올리고 페이징을 하게된다.
+
+
+
+
+
+
+
+
+
+## 주문 조회 V3.1: 엔티티를 DTO로 변환 - 페치 조인 최적화
+
+```java
+@GetMapping("/api/v3.1/orders")
+public List<OrderDto> ordersV3_page(
+        @RequestParam(value = "offset", defaultValue = "0") int offset,
+        @RequestParam(value = "limit", defaultValue = "100") int limit
+) {
+    List<Order> orders = orderRepository.findAllwithMemberDelivery(offset, limit);
+
+    List<OrderDto> collect = orders.stream()
+            .map(o -> new OrderDto(o))
+            .collect(Collectors.toList());
+
+    return collect;
+}
+```
+
+```java
+public List<Order> findAllwithMemberDelivery(int offset, int limit) {
+    return em.createQuery(
+            "select new jpabook.jpashop.repository.OrderSimpleQueryDto(o.id, m.name, o.orderDate, o.status, d.address) " +
+                    "from Order o" +
+                    " join o.member m" +
+                    " join o.delivery d", Order.class
+            ).setFirstResult(offset)
+            .setMaxResults(limit)
+            .getResultList();
+}
+```
+
+```yaml
+  jpa:
+    properties:
+      hibernate:
+          default_batch_fetch_size: 100
+```
+
+
+
+기존 일대 다관계에서 Lazy로 로딩하는 경우 n+1 문제 때문에 데이터들이 메모리에 한번에 올라가는 문제가 있었다. 이는 1* n * m 번의 쿼리가 전송되게 된다. 이를 해결하려면 JPA의 `default_batch_fetch_size`를 사용하면 된다. 앞서 조회한 쿼리에 대한 내용을 in으로 묶어서 한번에 조회하게된다. 따라서 1 + 1 + 1 의 쿼리가 전송되게 되는것이다. 따라서 다대일 Lazy로딩과 같은 효과를 보게되어 페이징이 가능해진다.
+
+
+
+
+
+
+
+
+
+## 주문 조회 V4: JPA에서 DTO 직접조회
+
+```java
+@GetMapping("/api/v4/orders")
+public List<OrderQueryDto> ordersV4() {
+    return orderQueryRepository.findOrderQueryDtos();
+}
+```
+
+```java
+public List<OrderQueryDto> findOrderQueryDtos() {
+    List<OrderQueryDto> result = findOrders();
+    result.forEach(o -> {
+        List<OrderItemQueryDto> orderItems = findOrderItems(o.getOrderId());
+        o.setOrderItems(orderItems);
+    });
+    return result;
+}
+
+private List<OrderItemQueryDto> findOrderItems(Long orderId) {
+    return em.createQuery(
+            "select new jpabook.jpashop.repository.order.query.OrderItemQueryDto(oi.order.id, i.name, oi.orderPrice, oi.count) from OrderItem oi" +
+                    " join oi.item i" +
+                    " where oi.order.id = :orderId", OrderItemQueryDto.class)
+            .setParameter("orderId", orderId)
+            .getResultList();
+}
+
+private List<OrderQueryDto> findOrders() {
+    return em.createQuery(
+            "select new jpabook.jpashop.repository.order.query.OrderQueryDto(o.id, m.name, o.orderDate, o.status, d.address) from Order o" +
+                    " join o.member m" +
+                    " join o.delivery d", OrderQueryDto.class
+    ).getResultList();
+}
+```
+
+
+
+DTO로 분리하기 위해 먼저 Order를 조회하여 DTO에 초기화한다. 이때 join을 사용하여 Order만 영속화 하여 가져온다. 이때 orderItems는 컬렉션이라 바로 초기화가 안된다. 따라서 가져온 OrderQueryDto에서 orderid를 통해 OrderItems를 다시 조회하여 OrderItemQueryDto를 태운다. 이렇게 하면 DTO와 API 스펙을 분리하게 된다. 하지만 처음 Order가 하나 조회될때 OrderItem이 N번 조회되어 n+1 문제가 발생한다.
+
+
+
+
+
+
+
+## 
+
+## 주문 조회 V5: JPA에서 DTO 직접 조회 - 컬렉션 조회 최적화
+
+```java
+@GetMapping("/api/v5/orders")
+public List<OrderQueryDto> ordersV5() {
+    return orderQueryRepository.findAllByDto_optimization();
+}
+```
+
+```java
+public List<OrderQueryDto> findAllByDto_optimization() {
+    List<OrderQueryDto> result = findOrders();
+
+    Map<Long, List<OrderItemQueryDto>> orderItemMap = findOrderItemMap(toOrderItems(result));
+
+    result.forEach(o -> o.setOrderItems(orderItemMap.get(o.getOrderId())));
+
+    return result;
+}
+
+private Map<Long, List<OrderItemQueryDto>> findOrderItemMap(List<Long> orderIds) {
+    List<OrderItemQueryDto> orderItems = em.createQuery(
+                    "select new jpabook.jpashop.repository.order.query.OrderItemQueryDto(oi.order.id, i.name, oi.orderPrice, oi.count) from OrderItem oi" +
+                            " join oi.item i" +
+                            " where oi.order.id in :orderIds"
+                    , OrderItemQueryDto.class)
+            .setParameter("orderIds", orderIds)
+            .getResultList();
+
+    Map<Long, List<OrderItemQueryDto>> orderItemMap = orderItems.stream()
+            .collect(Collectors.groupingBy(OrderItemQueryDto::getOrderId));
+    return orderItemMap;
+}
+
+private List<Long> toOrderItems(List<OrderQueryDto> result) {
+    List<Long> orderIds = result.stream()
+            .map(o -> o.getOrderId())
+            .collect(Collectors.toList());
+    return orderIds;
+}
+```
+
+
+
+Order는 똑같이 조회한 뒤 id를 for문으로 반복해서 쿼리를 전송하는게 아닌 하나의 Collection으로 만들고 `=`조건이 아닌 `in`을 통해 한번에 쿼리를 한다. 받은 데이터를 ID별로 Map을 만든다. 마지막으로 OrderQueryDto에 id 별 OrderItemQueryDto를 찾아 초기화 해준다. 위 방법을 통해 n+1 문제를 해결 할 수 있게된다.
+
+
+
+
+
+## 주문 조회 V6: JPA에서 DTO로 직접 조회, 플렛 데이터 최적화
+
+```java
+@GetMapping("/api/v6/orders")
+public List<OrderFlatDto> ordersV6() {
+    return orderQueryRepository.findAllByDto_flat();
+}
+```
+
+```java
+public List<OrderFlatDto> findAllByDto_flat() {
+    return em.createQuery(
+            "select new jpabook.jpashop.repository.order.query.OrderFlatDto(o.id, m.name, o.orderDate, o.status, d.address, i.name, oi.orderPrice, oi.count)" +
+                    " from Order o" +
+                    " join o.member m" +
+                    " join o.delivery d" +
+                    " join o.orderItems oi" +
+                    " join oi. item i", OrderFlatDto.class).getResultList();
+}
+```
+
+```java
+@Data
+public class OrderFlatDto {
+    private Long orderId;
+    private String name;
+    private LocalDateTime orderDate;
+    private OrderStatus orderStatus;
+    private Address address;
+    private String itemName;
+    private int orderPrice;
+    private int count;
+
+    public OrderFlatDto(Long orderId, String name, LocalDateTime orderDate, OrderStatus orderStatus, Address address, String itemName, int orderPrice, int count) {
+        this.orderId = orderId;
+        this.name = name;
+        this.orderDate = orderDate;
+        this.orderStatus = orderStatus;
+        this.address = address;
+        this.itemName = itemName;
+        this.orderPrice = orderPrice;
+        this.count = count;
+    }
+}
+```
+
+
+
+기존에 일대다 관계에서는 해당 데이터를 모아서 다시 쿼리를 전송했는데 위와 같이하면 한번에 데이터를 조인해서 가져올 수 있다. 하지만 그룹핑 하지 않아 후작업으로 어플리케이션 레벨에서 그룹핑을 해야한다. 또한 페이징도 할 수 없게 된다.
+
+
+
+
+
+## OSIV의 성는 최적화
+
+open session in view는 데이터베이스의 session을 사용하는 라이프사이클을 클라이언트한테 전달 될때까지 유지한다. 따라서 session을 반환하는데 오랜 시간이 걸릴다. 만약 이걸 끄게 되면 service 까지만 session이 유지되고 이후 호출되는 session은 Exception을 발생시킨다.
+
+```yaml
+  jpa:
+    open-in-view: false
+```
